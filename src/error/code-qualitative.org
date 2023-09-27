@@ -1,0 +1,167 @@
+* setup
+#+BEGIN_SRC python :session :results silent
+import nimfa
+import pandas
+import scipy
+import numpy as np
+import json
+None
+#+END_SRC
+
+#+NAME: init
+#+BEGIN_SRC clojure :results silent
+(ns errorcode
+  (:require [cheshire.core :refer :all]
+            [conexp.base :refer :all]
+            [conexp.fca.contexts :refer :all]
+            [conexp.io.contexts :refer :all]
+            [conexp.fca.smeasure :refer :all]
+            [conexp.fca.lattices :refer :all]
+            [conexp.gui.draw :refer :all]))
+#+END_SRC
+
+** prepare context data
+#+BEGIN_SRC clojure
+(write-context :named-binary-csv (read-context "data/animal_porpose.cxt") "data/animal_porpose-csv.cxt")
+#+END_SRC
+
+* python factorization
+#+NAME: factor-ctx
+#+BEGIN_SRC python :session :results output
+f = "data/animal_domestic_csv.cxt"
+cxt = pandas.read_table(f,index_col=0,delimiter=",")
+
+bmf = nimfa.Bmf(cxt.values, seed="nndsvd", n_run=30, track_error=True, rank=10, max_iter=500, lambda_w=1.1, lambda_h=1.1)
+bmf_fit = bmf.factorize()
+
+W = bmf_fit.basis()
+H = bmf_fit.coef()
+
+discrete_W = W.round()
+fact_cxt = [[cxt.index[obj]]+[int(discrete_W[obj,attr]) for attr in range(0,discrete_W.shape[1])] for obj in range(0, discrete_W.shape[0])]
+discrete_fitted = bmf_fit.fitted().round()
+fitted_cxt = [[cxt.index[obj]]+[int(discrete_fitted[obj,attr]) for attr in range(0,discrete_fitted.shape[1])] for obj in range(0, discrete_fitted.shape[0])]
+#+END_SRC
+
+#+RESULTS: factor-ctx
+
+** dump
+#+BEGIN_SRC python
+with open('/home/hirth/work/clojure/data/animal_factor_incidence.json','w') as o:
+   json.dump(fact_cxt, o)
+with open('/home/hirth/work/clojure/data/animal_fitted_incidence.json','w') as o:
+   json.dump(fitted_cxt, o)     
+#+END_SRC
+
+#+RESULTS:
+
+** quality
+#+BEGIN_SRC python :session 
+he = scipy.spatial.distance.hamming(cxt.values.flatten(), bmf_fit.fitted().round().astype(int).flatten())*cxt.values.shape[0] *cxt.values.shape[1]
+I_size = cxt.values.shape[0] *cxt.values.shape[1]
+"Hemming distance of I is " + str(he) + " of " + str(I_size) + " which is " + str(round(100*he/I_size,1)) + "%"
+#+END_SRC
+
+* clojure Smeasure
+** read in context
+Objects names are concatenated with ' ' for some strange reason.
+#+BEGIN_SRC clojure
+  (def fitted-inc 
+    (let [matrix (parse-string (slurp "../data/animal_fitted_incidence.json"))]
+      (reduce (fn [m [obj & inc]] (assoc m obj inc)) {} matrix)))
+  (def fitted-cxt 
+    (let [i fitted-inc]
+      (rename-objects (make-context (keys i)
+                    (range (count (first (vals i))))
+                    #(= 1 (nth (get i %1) %2))) 
+                    #(apply str (reverse (rest (reverse %)))))))
+
+  (def factor-inc 
+    (let [matrix (parse-string (slurp "../data/animal_factor_incidence.json"))]
+      (reduce (fn [m [obj & inc]] (assoc m obj inc)) {} matrix)))
+  (def factor-cxt 
+    (let [i factor-inc]
+    (rename-objects (make-context (keys i)
+                    (range (count (first (vals i))))
+                    #(= 1 (nth (get i %1) %2))) 
+                    #(apply str (reverse (rest (reverse %)))))))
+                    
+(def d (read-context "../data/animal_porpose.cxt"))
+(assert (= (objects factor-cxt) (objects d)) "Check object names")
+#+END_SRC
+
+** compute scales
+#+BEGIN_SRC clojure
+(def sm (make-smeasure-nc d factor-cxt identity))
+(def val-attr-scale (scale (smeasure-valid-attr sm)))
+(def inval-attr-scale (scale (smeasure-invalid-attr sm)))
+(def val-exts-scale (scale 
+                     (meet-irreducibles-only-smeasure 
+                      (conjunctive-normalform-smeasure-representation
+                       (smeasure-by-exts (context sm) 
+                                         (difference 
+                                          (set (extents factor-cxt)) 
+                                          (set (error-in-smeasure sm))))))))
+(def inval-exts-scale (scale 
+                       (meet-irreducibles-only-smeasure 
+                        (conjunctive-normalform-smeasure-representation
+                         (smeasure-by-exts (context sm) 
+                                           (set (error-in-smeasure sm)))))))
+(def join-complement-scale
+  (scale 
+   (meet-irreducibles-only-smeasure 
+    (conjunctive-normalform-smeasure-representation
+     (join-complement 
+      (make-smeasure-nc factor-cxt
+                        val-exts-scale
+                        identity))))))
+(def all-scale (let [val (scale (conjunctive-normalform-smeasure-representation (smeasure-by-exts (context sm) 
+                                         (difference 
+                                          (set (extents factor-cxt)) 
+                                          (set (error-in-smeasure sm))))))] (context-apposition 
+                factor-cxt
+                (rename-attributes
+                val
+                 #(clojure.string/join "" 
+                                       ["val" (.indexOf (vec 
+                                                         (attributes val)) %)])))))
+ 
+#+END_SRC
+
+** compute error stats
+
+ #+BEGIN_SRC clojure
+   (let [original d
+         factor factor-cxt
+         sm (make-smeasure-nc original factor identity)
+         fitted fitted-cxt]
+     (println "Concepts Original: " (count (concepts original)))
+     (println "Concepts fitted: " (count (concepts fitted)))
+     (println "Error: " (count (difference (set (extents fitted)) (set (extents original)))))
+     (println "Val: " (count (intersection (set (extents fitted)) (set (extents original)))))
+     (println "  ")
+     (println "Concepts Original: " (count (concepts original)))
+     (println "Concepts factor: " (count (concepts factor)))
+     (println "Val Concepts" (- (count (concepts factor)) (count (error-in-smeasure sm))))
+     (println "Error: " (count (error-in-smeasure sm)))
+     (println "Factor attributes " (count (attributes factor)))
+     (println "Val Attr + Concepts: " (count (valid-attributes sm)) "  "(count (concepts val-attr-scale)))
+     (println "InVal Attr + Concepts: " (- (count (attributes factor)) (count (valid-attributes sm))) "  "(count (concepts inval-attr-scale)))
+     (println "Join-Complement + ErrLattice: " (count (concepts join-complement-scale )) "   " (count (concepts inval-exts-scale ))))
+ #+END_SRC
+
+
+** concept lattices
+#+BEGIN_SRC clojure
+(-> all-scale concept-lattice draw-lattice)
+
+(-> val-attr-scale concept-lattice draw-lattice)
+
+(-> inval-attr-scale concept-lattice draw-lattice)
+
+(-> val-exts-scale concept-lattice draw-lattice)
+
+(-> inval-exts-scale concept-lattice draw-lattice)
+
+(-> join-complement-scale concept-lattice draw-lattice)
+#+END_SRC

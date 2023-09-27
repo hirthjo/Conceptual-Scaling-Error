@@ -1,0 +1,10 @@
+* [[https://dx.doi.org/10.1007/978-3-030-86982-3_8][Quantifying the Conceptual Error in Dimensionality Reduction]]
+This repository contains the code used for our analysis in [[https://dx.doi.org/10.1007/978-3-030-86982-3_8][Quantifying
+the Conceptual Error in Dimensionality Reduction]]. Detailed
+descriptions on the experiments and the used data can be found in the
+article. To run the experiments place the data set in the data
+directory and start a clojure and Python REPL.
+
+Pleace cite the following article when using the presented measures:
+
+/Hanika, T., Hirth, J.: Quantifying the Conceptual Error in Dimensionality Reduction In: Braun, T., Gehrke, M., Hanika, T., and Hernandez, N. (eds.) Graph-Based Representation and Reasoning - 26th International Conference on Conceptual Structures, {ICCS} 2021, Virtual Event, September 20-22, 2021, Proceedings. pp. 105–118. Springer (2021)./

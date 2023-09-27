@@ -1,0 +1,277 @@
+* setup
+#+NAME: init
+#+BEGIN_SRC clojure :results silent
+(ns errorcode
+  (:require [cheshire.core :refer :all]
+            [conexp.base :refer :all]
+            [conexp.fca.contexts :refer :all]
+            [conexp.io.contexts :refer :all]
+            [conexp.fca.smeasure :refer :all]
+            [conexp.fca.lattices :refer :all]
+            [conexp.gui.draw :refer :all]))
+
+(def datadir  "data/")
+(def odir "output/")
+
+(def data 
+  (let [files (.listFiles 
+               (clojure.java.io/file datadir))]
+    (->> files
+         (filter #(re-find #"ctx$" (.getName %))))))
+#+END_SRC
+
+#+BEGIN_SRC python :session :results silent
+import nimfa
+import pandas
+import scipy
+import numpy as np
+import json
+from os import listdir
+from os.path import isfile, join
+import re
+import math
+
+odir = "output/"
+data = ['sds26-Hayes-Roth.ctx',
+        'sds28-Chess-Player.ctx',
+        'sds14-Recipes.ctx',
+        'sds11-UFC-Fights.ctx',
+        'sds10-Airbnb-Berlin.ctx',
+        'sds4-Plant-Habitats.ctx',
+        'sds2-HIV-1ProteaseCleavage.ctx',
+        'sds6-Diagnosis.ctx',
+        'zoo.ctx', 
+        'mushroom.ctx',
+        'sds14-Recipes.ctx']
+None
+#+END_SRC
+
+** prepare context data
+#+BEGIN_SRC clojure
+(for [d data]
+  (write-context :named-binary-csv 
+                 (read-context (.getPath d)) (str odir (.getName d))))
+
+#+END_SRC
+
+* python factorization
+#+NAME: factor-ctx
+#+BEGIN_SRC python :session :results output
+facts = dict()
+
+for f in data:
+    facts[f] = dict()
+    cxt = pandas.read_table(odir + f,index_col=0,delimiter=",")
+    bmf = nimfa.Bmf(cxt.values, seed="nndsvd", n_run=30, track_error=True, rank=round(math.sqrt(cxt.shape[1])), max_iter=500, lambda_w=1.1, lambda_h=1.1)
+    bmf_fit = bmf.factorize()
+    V = cxt.values
+    W = bmf_fit.basis()
+    H = bmf_fit.coef()
+    WH = bmf_fit.fitted()
+    facts[f]["V"] = V
+    facts[f]["W"] = W
+    facts[f]["H"] = H
+    facts[f]["WH"] = WH
+    facts[f]["cxt"] = cxt
+    print("Done " + f)
+
+for f in data:
+    cxt = pandas.read_table(odir + f,index_col=0,delimiter=",")
+    unique, counts = np.unique(cxt.values.flatten(), return_counts=True)
+    d = dict(zip(unique, counts))
+    if 1 in d:
+        print(f + "\n" + str(d[1]/(d[1]+d[0]))  +"\n" )
+    else:
+        print(f + "\n" +"0"  +"\n" )
+    W = pandas.read_table(odir + f[:-4] + "_fact_incidence.cxt",index_col=0,delimiter=",")
+    V = pandas.read_table(odir + f[:-4] + "_fitted_incidence.cxt",index_col=0,delimiter=",")
+    uniqueW, countsW = np.unique(W.values.flatten(), return_counts=True)
+    dW = dict(zip(uniqueW, countsW))
+    uniqueV, countsV = np.unique(V.values.flatten(), return_counts=True)
+    dV = dict(zip(uniqueV, countsV))    
+    if 1 in dW:
+        print(str(dW[1]/(dW[1]+dW[0]))  +"\n" )
+    else:
+        print("0 \n" )
+    if 1 in dV:
+        print(str(dV[1]/(dV[1]+dV[0]))  +"\n" )
+    else:
+        print("0 \n" )
+    
+#+END_SRC
+** dump
+#+NAME: dump
+#+BEGIN_SRC python :session :results output
+for f in data:
+    pandas.DataFrame(facts[f]['W'].round()).set_index(facts[f]['cxt'].index).astype(int).to_csv(odir + f[:-4] + "_fact_incidence.cxt")
+    pandas.DataFrame(facts[f]['WH'].round()).set_index(facts[f]['cxt'].index).astype(int).to_csv(odir + f[:-4] + "_fitted_incidence.cxt")
+#+END_SRC
+
+** quality
+#+BEGIN_SRC python :session 
+for f in data:
+    he = scipy.spatial.distance.hamming(facts[f]["cxt"].values.flatten(), facts[f]["WH"].round().astype(int).flatten())*facts[f]["cxt"].values.shape[0] *facts[f]["cxt"].values.shape[1]
+    I_size = facts[f]["cxt"].values.shape[0] *facts[f]["cxt"].values.shape[1]
+    print("Hemming distance of I is " + str(he) + " of " + str(I_size) + " which is " + str(round(100*he/I_size,1)) + "%")
+    frob = np.linalg.norm(facts[f]["V"]-facts[f]["WH"],'fro')
+    discrete_frob = np.linalg.norm(facts[f]["V"].round()- facts[f]["WH"].round(),'fro')
+    facts[f]["frob"] = frob
+    facts[f]["d_frob"] = discrete_frob
+    facts[f]["he"] = he
+    facts[f]["I"] = I_size
+    print("Frob Norm of I is " + str(frob) + " and discrete " + str(discrete_frob))
+#+END_SRC
+
+TODO compute means
+
+* clojure Smeasure
+** read in context
+Objects names are concatenated with ' ' for some strange reason.
+#+BEGIN_SRC clojure
+
+(defn get-i [f]
+  (let [matrix (parse-string (slurp f))]
+    (reduce (fn [m [obj & inc]] (assoc m obj inc)) {} matrix)))
+
+(defn i->cxt [i] 
+  (rename-objects (make-context (keys i)
+                                (range (count (first (vals i))))
+                                #(= 1 (nth (get i %1) %2))) 
+                  #(apply str (reverse (rest (reverse %))))))
+
+(defn read-f [f] 
+  (let [name (subs (.getName f) 0 (- (count (.getName f)) 4))]
+    {"cxt" 
+     (read-context (.getPath f))
+     "fact" 
+     (read-context (str odir  name  "_fact_incidence.cxt") :named-binary-csv )
+     "fitted"
+     (read-context (str odir  name  "_fitted_incidence.cxt") :named-binary-csv )}))
+
+(def facts 
+  (reduce #(assoc %1 %2 (read-f %2)) {} data))
+
+(def facts (update-in facts [(nth data 5) "cxt"] (fn [c] (rename-objects c #(str % " ")))))
+(def facts (update-in facts [(nth data 6) "cxt"] (fn [c] (rename-objects c #(str % " ")))))
+(def facts (update-in facts [(nth data 7) "cxt"] (fn [c] (rename-objects c #(str % " ")))))
+(def facts (update-in facts [(nth data 9) "cxt"] (fn [c] (rename-objects c #(str % " ")))))
+
+(for [f data]
+  (assert (= (objects (get-in facts [f "cxt"])) (objects (get-in facts [f "fact"]))) "Check object names"))
+#+END_SRC
+
+** compute scales
+#+BEGIN_SRC clojure
+(defn medium-sm-analysis [f]
+  (let [{cxt "cxt"
+         factor-cxt "fact"
+         fitted "fitted"} (get facts f)
+        sm (make-smeasure-nc cxt factor-cxt identity)
+        val-attr-scale (scale (smeasure-valid-attr sm))
+        inval-attr-scale (scale (smeasure-invalid-attr sm))
+        val-exts-scale (scale 
+                        (meet-irreducibles-only-smeasure 
+                         (conjunctive-normalform-smeasure-representation
+                          (smeasure-by-exts (context sm) 
+                                            (difference 
+                                             (set (extents factor-cxt)) 
+                                             (set (error-in-smeasure sm)))))))
+        inval-exts-scale (scale 
+                          (meet-irreducibles-only-smeasure 
+                           (conjunctive-normalform-smeasure-representation
+                            (smeasure-by-exts (context sm) 
+                                              (set (error-in-smeasure sm))))))]
+    {"sm" sm
+     "val-attr-scale" val-attr-scale
+     "inval-attr-scale" inval-attr-scale
+     "val-exts-scale" val-exts-scale
+     "inval-exts-scale" inval-exts-scale}))
+
+(defn sm-analysis [f]
+  (let [{cxt "cxt"
+         factor-cxt "fact"
+         fitted "fitted"} (get facts f)
+        sm (make-smeasure-nc cxt factor-cxt identity)
+        val-attr-scale (scale (smeasure-valid-attr sm))
+        inval-attr-scale (scale (smeasure-invalid-attr sm))
+        val-exts-scale (scale 
+                        (meet-irreducibles-only-smeasure 
+                         (conjunctive-normalform-smeasure-representation
+                          (smeasure-by-exts (context sm) 
+                                            (difference 
+                                             (set (extents factor-cxt)) 
+                                             (set (error-in-smeasure sm)))))))
+        inval-exts-scale (scale 
+                          (meet-irreducibles-only-smeasure 
+                           (conjunctive-normalform-smeasure-representation
+                            (smeasure-by-exts (context sm) 
+                                              (set (error-in-smeasure sm))))))
+        join-complement-scale (scale 
+                               (meet-irreducibles-only-smeasure 
+                                (conjunctive-normalform-smeasure-representation
+                                 (join-complement 
+                                  (make-smeasure-nc factor-cxt
+                                                    val-exts-scale
+                                                    identity)))))]
+    {"sm" sm
+     "val-attr-scale" val-attr-scale
+     "inval-attr-scale" inval-attr-scale
+     "val-exts-scale" val-exts-scale
+     "inval-exts-scale" inval-exts-scale
+     "join-complement-scale" join-complement-scale}))
+
+
+(defn small-sm-analysis [f]
+  (let [{cxt "cxt"
+         factor-cxt "fact"
+         fitted "fitted"} (get facts f)
+        sm (make-smeasure-nc cxt factor-cxt identity)
+        val-attr-scale (scale (smeasure-valid-attr sm))
+        inval-attr-scale (scale (smeasure-invalid-attr sm))]
+    {"sm" sm
+     "val-attr-scale" val-attr-scale
+     "inval-attr-scale" inval-attr-scale}))
+
+
+(def facts
+  (let [sm-results (reduce #(assoc %1 %2 (sm-analysis %2)) {} (keys facts))]
+    (merge-with merge facts sm-results)))
+#+END_SRC
+
+** compute error stats
+#+BEGIN_SRC clojure
+(for [d small-data]
+  (let [f facts
+        original (get-in facts [d "cxt"])
+        factor (get-in facts [d "fact"])
+        sm (make-smeasure-nc original factor identity)
+        fitted (get-in facts [d "fitted"])
+        sm-fitted (make-smeasure-nc original fitted identity)]
+    (println "  " (.getName d))
+    ;; (println "o " (count (objects original)) " a " (count (attributes original)))
+    ;; (let [v (count (valid-attributes sm))]
+    ;;   (println "attr factor "(count (attributes factor)) " val factor a " v " inval factor a " (- (count (attributes factor)) v) ))
+    ;; (let [v (count (valid-attributes sm-fitted))]
+    ;;   (println "attr fitted " (count (attributes fitted)) " val fitted a " v " inval fitted a " (- (count (attributes fitted)) v) ))
+    (let [e (extents factor)
+          v (filter #(extent? original %) e)] 
+      (println "e factor " (count e) " val factor e " (count v) " inval factor e " (- (count e) (count v))))    
+    (println "Concepts Original: " (count (concepts original)))
+     (let [e (extents fitted)
+          v (filter #(extent? original %) e)] 
+      (println "e fitted " (count e) " val fitted e " (count v) " inval fitted e " (- (count e) (count v))))))
+
+(for [d data]
+  (let [f facts
+        original (get-in facts [d "cxt"])
+        factor (get-in facts [d "fact"])
+        sm (make-smeasure-nc original factor identity)
+        fitted (get-in facts [d "fitted"])
+        sm-fitted (make-smeasure-nc original fitted identity)]
+    (println "  " (.getName d))
+    (println "o " (count (objects original)) " a " (count (attributes original)))
+    (let [v (count (valid-attributes sm))]
+      (println "attr factor "(count (attributes factor)) " val factor a " v " inval factor a " (- (count (attributes factor)) v) ))
+    (let [v (count (valid-attributes sm-fitted))]
+      (println "attr fitted " (count (attributes fitted)) " val fitted a " v " inval fitted a " (- (count (attributes fitted)) v) ))))
+#+END_SRC
